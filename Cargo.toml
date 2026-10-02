@@ -1,0 +1,16 @@
+[package]
+name = "dag-scheduler"
+version = "0.2.0"
+edition = "2021"
+# Minimum supported toolchain. Set by `std::thread::scope` and const
+# `Mutex::new`, both stabilised in 1.63. Cargo will emit a clear error on
+# anything older instead of a confusing type error.
+rust-version = "1.63"
+
+# This assignment uses the standard library ONLY.
+# Do not add anything here — no rand, no rayon, no crossbeam, no tokio.
+# A submission with a non-empty dependency list will not be graded.
+[dependencies]
+
+[profile.release]
+opt-level = 3
