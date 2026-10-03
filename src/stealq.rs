@@ -1,8 +1,11 @@
 //! Part A — the work-stealing queue.
 
+use core::panic;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+
+use std::ptr;
+use std::sync::atomic::{fence, AtomicUsize, AtomicPtr, Ordering};
+use std::sync::{Mutex};
 
 /// The result of a steal attempt.
 ///
@@ -17,6 +20,53 @@ pub enum StealOutcome<T> {
     Vacant,
     /// Another thief won the race (retry, or try someone else).
     Contended,
+}
+
+struct Buffer<T> {
+    capacity: usize,
+    slots: Box<[AtomicPtr<T>]>,
+}
+
+impl<T> Buffer<T> {
+    fn new(capacity: usize) -> Self {
+        let capacity = capacity
+            .max(2)
+            .checked_next_power_of_two()
+            .expect("StealQueue capacity is too large");
+
+        let mut slots = Vec::with_capacity(capacity);
+        slots.resize_with(capacity, || AtomicPtr::new(ptr::null_mut()));
+
+        Self {
+            capacity,
+            slots: slots.into_boxed_slice(),
+        }
+    }
+
+    fn grow(&self, top: usize, bottom: usize) -> Box<Buffer<T>> {
+        let new = Box::new(Buffer::new(self.capacity * 2));
+
+        for index in top..bottom {
+            let item = self.slot(index).load(Ordering::Acquire);
+            new.slot(index).store(item, Ordering::Relaxed);
+        }
+
+        new
+    }
+    
+    #[inline]
+    fn slot(&self, index: usize) -> &AtomicPtr<T> {
+        &self.slots[index & (self.capacity - 1)]
+    }
+
+
+    #[inline]
+    unsafe fn take_slot(&self, index: usize) -> Option<T> {
+        // Safety: the caller must have already claimed this queue position, so no
+        // other thread can convert the same raw pointer back into a `Box<T>`.
+       let item = self.slot(index).swap(ptr::null_mut(), Ordering::AcqRel);
+        (!item.is_null()).then(|| *Box::from_raw(item))
+    }
 }
 
 /// A work-stealing queue.
@@ -56,9 +106,14 @@ pub struct StealQueue<T> {
     //
     // The single-lock skeleton is provided as a starting point.
     // You are free to replace it entirely.
-    top: Mutex<Vec<T>>,
-    bottom: Mutex<Vec<T>>,
+    top: AtomicUsize,
+    bottom: AtomicUsize,
+    buffer: AtomicPtr<Buffer<T>>,
+    retired: Mutex<Vec<*mut Buffer<T>>>,
 }
+
+unsafe impl<T: Send> Send for StealQueue<T> {}
+unsafe impl<T: Send> Sync for StealQueue<T> {}
 
 impl<T: Send> StealQueue<T> {
     /// Create a new empty queue with room for at least `capacity` items.
@@ -71,9 +126,13 @@ impl<T: Send> StealQueue<T> {
         //
         // For the locked version:
         //   Mutex::new(VecDeque::with_capacity(capacity))
-        Self { 
-            top: Mutex::new(Vec::with_capacity(capacity)), 
-            bottom: Mutex::new(Vec::with_capacity(capacity))
+        let buffer = Box::into_raw(Box::new(Buffer::new(capacity)));
+
+        Self {
+            top: AtomicUsize::new(0),
+            bottom: AtomicUsize::new(0),
+            buffer: AtomicPtr::new(buffer),
+            retired: Mutex::new(Vec::new()),
         }
     }
 
@@ -89,8 +148,25 @@ impl<T: Send> StealQueue<T> {
         // Chase–Lev:
         //   Write item at buffer[bottom], then increment bottom (Release).
         //   Grow the buffer first if bottom - top >= capacity.
-        let mut bottom = self.bottom.lock().expect("bottom lock poisoned");
-        bottom.push(item);
+        let bottom = self.bottom.load(Ordering::Relaxed);
+        let top = self.top.load(Ordering::Acquire);
+        let mut buffer = self.buffer.load(Ordering::Acquire);
+
+        // Safety: `buffer` is initialized in `with_capacity`, and buffers are
+        // retained until Drop, so it remains valid for the queue's lifetime.
+        if bottom.wrapping_sub(top) >= unsafe { (*buffer).capacity - 1 } {
+            buffer = self.grow(buffer, top, bottom);
+        }
+
+        // Safety: only the owner writes at `bottom`; the slot is published by
+        // the Release store to `bottom` below.
+        unsafe {
+            (*buffer)
+                .slot(bottom)
+                .store(Box::into_raw(Box::new(item)), Ordering::Release);
+        }
+
+        self.bottom.store(bottom.wrapping_add(1), Ordering::Release);
     }
 
     /// Pop an item from the bottom of the queue (LIFO).
@@ -108,16 +184,46 @@ impl<T: Send> StealQueue<T> {
         //   If bottom == top, CAS top to top+1 — you are racing a thief
         //   for the last element. On success return the item.
         //   Either way, reset bottom = top + 1 before returning.
-        let mut bottom = self.bottom.lock().expect("bottom lock poisoned");
-
-        if let Some(item) = bottom.pop() {
-            return Some(item);
+       let bottom = self.bottom.load(Ordering::Relaxed);
+        if bottom == 0 {
+            return None;
         }
 
-        let mut top = self.top.lock().expect("top lock poisoned");
-        bottom.extend(top.drain(..).rev());
+        let bottom = bottom.wrapping_sub(1);
+        self.bottom.store(bottom, Ordering::Relaxed);
+        fence(Ordering::SeqCst);
 
-        bottom.pop()
+        let top = self.top.load(Ordering::SeqCst);
+
+        if top > bottom {
+            self.bottom.store(top, Ordering::Relaxed);
+            return None;
+        }
+
+        let buffer = self.buffer.load(Ordering::Acquire);
+
+        if top == bottom {
+            // Owner and thieves race for the final item.
+            if self
+                .top
+                .compare_exchange(
+                    top,
+                    top.wrapping_add(1),
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                self.bottom.store(top.wrapping_add(1), Ordering::Relaxed);
+                return None;
+            }
+
+            self.bottom.store(top.wrapping_add(1), Ordering::Relaxed);
+        }
+
+        // Safety: the owner is either is the only thread that accesses a bottom slot
+        // or won the CAS race for the last item. Therefore no other thread can take this slot.
+        unsafe { (*buffer).take_slot(bottom) }
     }
 
     /// Steal an item from the top of the queue (FIFO).
@@ -143,32 +249,73 @@ impl<T: Send> StealQueue<T> {
         //   CAS top from old to old+1.
         //   On success return Took(item); otherwise return Contended.
 
-        let mut top = match self.top.try_lock() {
-            Ok(top) => top,
+        let top = self.top.load(Ordering::Acquire);
+        fence(Ordering::SeqCst);
+
+        let bottom = self.bottom.load(Ordering::Acquire);
+        if top >= bottom {
+            return StealOutcome::Vacant;
+        }
+
+        let buffer = self.buffer.load(Ordering::Acquire);
+
+        match self.top.compare_exchange(
+            top,
+            top.wrapping_add(1),
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ){
+            Ok(_) => {
+                // Safety: winning the CAS gives this thief exclusive ownership of `top`.
+                let item = unsafe { (*buffer).take_slot(top) };
+                StealOutcome::Took(item.expect("slot should be non-null"))
+            },
             Err(_) => {
                 return StealOutcome::Contended;
             }
-        };
-
-        if let Some(item) = top.pop() {
-            return StealOutcome::Took(item);
         }
 
-        let mut bottom = match self.bottom.try_lock() {
-            Ok(bottom) => bottom,
-            Err(_) => {
-                return StealOutcome::Contended;
-            }
-        };
-
-        top.extend(bottom.drain(..).rev());
-
-        match top.pop() {
-            Some(item) => StealOutcome::Took(item),
-            None => StealOutcome::Vacant,
-        }
     }
 
+    fn grow(&self, old: *mut Buffer<T>, top: usize, bottom: usize) -> *mut Buffer<T> {
+        let new = unsafe { Box::into_raw((&*old).grow(top, bottom)) };
+
+        self.buffer.store(new, Ordering::Release);
+        self.retired
+            .lock()
+            .expect("retired-buffer mutex poisoned")
+            .push(old);
+
+        new
+    }
+        
+}
+
+impl<T> Drop for StealQueue<T> {
+    fn drop(&mut self) {
+        let top = self.top.load(Ordering::Relaxed);
+        let bottom = self.bottom.load(Ordering::Relaxed);
+        let current = self.buffer.load(Ordering::Relaxed);
+
+        // Safety: Drop has exclusive access to the queue. Only the current
+        // buffer owns live item pointers; retired buffers contain stale copies.
+        unsafe {
+            for index in top..bottom {
+                drop((*current).take_slot(index));
+            }
+
+            drop(Box::from_raw(current));
+
+            for old in self
+                .retired
+                .get_mut()
+                .expect("retired-buffer mutex poisoned")
+                .drain(..)
+            {
+                drop(Box::from_raw(old));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
