@@ -367,7 +367,7 @@ impl ReadyTracker {
         let n = dag.nodes.len();
         let _ = n;
 
-        // TODO: Implement ReadyTracker::new
+        // TODO(Done): Implement ReadyTracker::new
         //
         // Steps:
         // 1. Build `in_degree`: for each node, count its dependencies.
@@ -382,7 +382,27 @@ impl ReadyTracker {
         //
         // 5. Return Self { .. }.
 
-        todo!("Implement ReadyTracker::new")
+        let in_degree = dag.nodes
+            .iter()
+            .map(|node| AtomicUsize::new(node.deps.len()))
+            .collect();
+
+        let mut successors = vec![Vec::new(); n];
+        for node in &dag.nodes {
+            for dep in &node.deps {
+                successors[*dep].push(node.id);
+            }
+        }
+
+        let completed = (0..n).map(|_| AtomicBool::new(false)).collect();
+
+        Self {
+            in_degree,
+            successors,
+            completed,
+            num_nodes: n,
+            completed_count: AtomicUsize::new(0),
+        }
     }
 
     /// Return every node ID whose in-degree is currently 0.
@@ -395,7 +415,17 @@ impl ReadyTracker {
         // Iterate over in_degree; include each node whose
         // in_degree.load(Ordering::Acquire) == 0.
 
-        todo!("Implement ReadyTracker::initial_frontier")
+        self.in_degree
+            .iter()
+            .enumerate()
+            .filter_map(|(id, deg)| {
+                if deg.load(Ordering::Acquire) == 0 {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Retire a completed node: decrement the in-degree of each successor
@@ -432,8 +462,15 @@ impl ReadyTracker {
         //
         // 3. Append to `newly_ready` — do NOT clear it.
 
-        let _ = (node_id, newly_ready);
-        todo!("Implement ReadyTracker::retire")
+        self.completed[node_id].store(true, Ordering::Release);
+        self.completed_count.fetch_add(1, Ordering::AcqRel);
+
+        for &succ in &self.successors[node_id] {
+            let prev = self.in_degree[succ].fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 {
+                newly_ready.push(succ);
+            }
+        }
     }
 
     /// True once every node in the DAG has been retired.
