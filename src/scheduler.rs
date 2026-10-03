@@ -306,7 +306,7 @@ impl Scheduler {
 
         let total_time = start.elapsed();
 
-        // Placeholder: replace with the data you actually collected.
+        // Stats collection
         let mut stats = RunStats::new(dag.name.clone(), num_workers);
         stats.total_time = total_time;
 
