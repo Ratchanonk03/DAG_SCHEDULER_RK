@@ -227,13 +227,96 @@ impl Scheduler {
 
         // --- YOUR CODE HERE ---
 
-        let _ = (num_workers, config, &tracker, dag, store);
+        let queues = Arc::new((0..num_workers)
+            .map(|_| Arc::new(StealQueue::<usize>::with_capacity(dag.len())))
+            .collect::<Vec<_>>());
+
+        for (i, node_id) in tracker.initial_frontier().into_iter().enumerate() {
+            queues[i % num_workers].push(node_id);
+        }
+        
+        let all_queues = &queues;
+
+        let worker_results = thread::scope(|scope| {
+            let mut handles = Vec::new();
+            
+            for worker_id in 0..num_workers {
+                let queues_handle = Arc::clone(&queues);
+                let tracker_handle = Arc::clone(&tracker);
+
+                handles.push(scope.spawn(move || {
+                    let my_queue = Arc::clone(&all_queues[worker_id]);
+                    
+                    let mut rng = SplitMix64::new(config.seed.wrapping_add(worker_id as u64));
+                    let mut scratch: Vec<usize> = Vec::new();
+                    let mut backoff = config.min_backoff;
+
+                    let mut tasks = 0usize;
+                    let mut steals = 0usize;
+                    let mut steal_attempts = 0usize;
+                    let mut idle_time = Duration::ZERO;
+
+
+                     loop {
+                        // Fast path: take from my own queue.
+                        let mut task = my_queue.pop();
+                
+                        // Slow path: probe up to config.steal_tries_per_round victims.
+                        if task.is_none() {
+                            for _ in 0..config.steal_tries_per_round {
+                                let victim = rng.below(num_workers);
+                                if victim == worker_id { continue; }   // never steal from self
+                                steal_attempts += 1;                // count EVERY probe
+                                match &all_queues[victim].steal() {
+                                    StealOutcome::Took(t)     => { steals += 1; task = Some(*t); break; }
+                                    StealOutcome::Contended   => { /* someone beat me; try again */ }
+                                    StealOutcome::Vacant      => { /* nothing there; next victim */ }
+                                }
+                            }
+                        }
+                
+                        match task {
+                            Some(node_id) => {
+                                execute_node(node_id, dag, store);
+                                tasks += 1;
+                
+                                scratch.clear();
+                                tracker_handle.retire(node_id, &mut scratch);
+                                for &succ in &scratch { my_queue.push(succ); }
+                
+                                backoff = config.min_backoff;   // reset on success
+                            }
+                            None => {
+                                if tracker_handle.is_drained() { break; }   // all work done
+                
+                                let t0 = Instant::now();
+                                thread::sleep(backoff);
+                                idle_time += t0.elapsed();
+                                backoff = (backoff * 2).min(config.max_backoff);
+                            }
+                        }
+                    }
+
+                    (tasks, steals, steal_attempts, idle_time)
+                }));
+            }
+
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
 
         let total_time = start.elapsed();
 
         // Placeholder: replace with the data you actually collected.
         let mut stats = RunStats::new(dag.name.clone(), num_workers);
         stats.total_time = total_time;
+
+        for (worker_id, (tasks, steals, steal_attempts, idle_time)) in worker_results.into_iter().enumerate(){
+            stats.tasks_per_worker[worker_id] = tasks;
+            stats.steals_per_worker[worker_id] = steals;
+            stats.steal_attempts_per_worker[worker_id] = steal_attempts;
+            stats.idle_time_per_worker[worker_id] = idle_time;
+        }
+
         stats.total_tasks = dag.len();
         stats
 

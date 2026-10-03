@@ -410,7 +410,7 @@ impl ReadyTracker {
     /// Called once at startup to seed the workers' queues. These are the
     /// graph's Input/weight nodes — its initial *frontier*.
     pub fn initial_frontier(&self) -> Vec<usize> {
-        // TODO: Implement initial_frontier
+        // TODO(Done): Implement initial_frontier
         //
         // Iterate over in_degree; include each node whose
         // in_degree.load(Ordering::Acquire) == 0.
@@ -444,7 +444,7 @@ impl ReadyTracker {
     /// Multiple workers may call this concurrently for different nodes.
     /// `AtomicUsize::fetch_sub` gives correctness without a lock.
     pub fn retire(&self, node_id: usize, newly_ready: &mut Vec<usize>) {
-        // TODO: Implement retire
+        // TODO(Done): Implement retire
         //
         // Steps:
         // 1. Mark this node completed:
