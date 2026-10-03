@@ -1,7 +1,8 @@
 //! Part A — the work-stealing queue.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 /// The result of a steal attempt.
 ///
@@ -36,7 +37,7 @@ pub enum StealOutcome<T> {
 ///
 /// Document your choice and your reasoning in the writeup.
 pub struct StealQueue<T> {
-    // TODO: Choose your internal representation.
+    // TODO(DONE): Choose your internal representation.
     //
     // Option 1 (Single/Two-Lock):
     //   inner: Mutex<VecDeque<T>>,
@@ -55,7 +56,8 @@ pub struct StealQueue<T> {
     //
     // The single-lock skeleton is provided as a starting point.
     // You are free to replace it entirely.
-    inner: Mutex<VecDeque<T>>,
+    top: Mutex<Vec<T>>,
+    bottom: Mutex<Vec<T>>,
 }
 
 impl<T: Send> StealQueue<T> {
@@ -65,19 +67,21 @@ impl<T: Send> StealQueue<T> {
     /// thief is mid-steal is exactly the hard case in a lock-free design,
     /// and even in the locked design it keeps the owner's push path cheap.
     pub fn with_capacity(capacity: usize) -> Self {
-        // TODO: Implement with_capacity.
+        // TODO(DONE): Implement with_capacity.
         //
         // For the locked version:
         //   Mutex::new(VecDeque::with_capacity(capacity))
-        let _ = capacity;
-        todo!("Implement StealQueue::with_capacity")
+        Self { 
+            top: Mutex::new(Vec::with_capacity(capacity)), 
+            bottom: Mutex::new(Vec::with_capacity(capacity))
+        }
     }
 
     /// Push an item to the bottom of the queue.
     ///
     /// Called only by the **owner** thread.
     pub fn push(&self, item: T) {
-        // TODO: Implement push.
+        // TODO(DONE): Implement push.
         //
         // Locked version:
         //   Lock the mutex, push_back(item).
@@ -85,8 +89,8 @@ impl<T: Send> StealQueue<T> {
         // Chase–Lev:
         //   Write item at buffer[bottom], then increment bottom (Release).
         //   Grow the buffer first if bottom - top >= capacity.
-        let _ = item;
-        todo!("Implement StealQueue::push")
+        let mut bottom = self.bottom.lock().expect("bottom lock poisoned");
+        bottom.push(item);
     }
 
     /// Pop an item from the bottom of the queue (LIFO).
@@ -94,7 +98,7 @@ impl<T: Send> StealQueue<T> {
     /// Called only by the **owner** thread.
     /// Returns `None` if the queue is empty.
     pub fn pop(&self) -> Option<T> {
-        // TODO: Implement pop.
+        // TODO(DONE): Implement pop.
         //
         // Locked version:
         //   Lock the mutex, pop_back().
@@ -104,7 +108,16 @@ impl<T: Send> StealQueue<T> {
         //   If bottom == top, CAS top to top+1 — you are racing a thief
         //   for the last element. On success return the item.
         //   Either way, reset bottom = top + 1 before returning.
-        todo!("Implement StealQueue::pop")
+        let mut bottom = self.bottom.lock().expect("bottom lock poisoned");
+
+        if let Some(item) = bottom.pop() {
+            return Some(item);
+        }
+
+        let mut top = self.top.lock().expect("top lock poisoned");
+        bottom.extend(top.drain(..).rev());
+
+        bottom.pop()
     }
 
     /// Steal an item from the top of the queue (FIFO).
@@ -114,7 +127,7 @@ impl<T: Send> StealQueue<T> {
     /// `StealOutcome::Vacant` if the queue is empty, or
     /// `StealOutcome::Contended` if another thief won the race.
     pub fn steal(&self) -> StealOutcome<T> {
-        // TODO: Implement steal.
+        // TODO(DONE): Implement steal.
         //
         // Locked version:
         //   Use try_lock (NOT lock).
@@ -129,7 +142,31 @@ impl<T: Send> StealQueue<T> {
         //   Read the item at buffer[top].
         //   CAS top from old to old+1.
         //   On success return Took(item); otherwise return Contended.
-        todo!("Implement StealQueue::steal")
+
+        let mut top = match self.top.try_lock() {
+            Ok(top) => top,
+            Err(_) => {
+                return StealOutcome::Contended;
+            }
+        };
+
+        if let Some(item) = top.pop() {
+            return StealOutcome::Took(item);
+        }
+
+        let mut bottom = match self.bottom.try_lock() {
+            Ok(bottom) => bottom,
+            Err(_) => {
+                return StealOutcome::Contended;
+            }
+        };
+
+        top.extend(bottom.drain(..).rev());
+
+        match top.pop() {
+            Some(item) => StealOutcome::Took(item),
+            None => StealOutcome::Vacant,
+        }
     }
 
 }
