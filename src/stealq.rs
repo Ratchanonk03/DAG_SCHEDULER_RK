@@ -108,6 +108,8 @@ pub struct StealQueue<T> {
     retired: Mutex<Vec<*mut Buffer<T>>>,
 }
 
+// Safety: shared state uses atomics or a Mutex, and tasks transfer ownership
+// only after an atomic index claim. Therefore it is safe when T: Send.
 unsafe impl<T: Send> Send for StealQueue<T> {}
 unsafe impl<T: Send> Sync for StealQueue<T> {}
 
@@ -274,6 +276,10 @@ impl<T: Send> StealQueue<T> {
     }
 
     fn grow(&self, old: *mut Buffer<T>, top: usize, bottom: usize) -> *mut Buffer<T> {
+        // Safety: `old` remains allocated because replaced buffers stay in `retired`
+        // until Drop. Copying slots copies pointers, not ownership: only the worker
+        // that claims an index converts its pointer back into `Box<T>`. Retired
+        // buffers never drop slot contents, preventing double-free.
         let new = unsafe { Box::into_raw((&*old).grow(top, bottom)) };
 
         self.buffer.store(new, Ordering::Release);
