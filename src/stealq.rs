@@ -189,7 +189,7 @@ impl<T: Send> StealQueue<T> {
         self.bottom.store(bottom, Ordering::Relaxed);
         fence(Ordering::SeqCst);
 
-        let top = self.top.load(Ordering::SeqCst);
+        let top = self.top.load(Ordering::Acquire);
 
         if top > bottom {
             self.bottom.store(top, Ordering::Relaxed);
