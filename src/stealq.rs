@@ -1,8 +1,4 @@
 //! Part A — the work-stealing queue.
-
-use core::panic;
-use std::collections::VecDeque;
-
 use std::ptr;
 use std::sync::atomic::{fence, AtomicUsize, AtomicPtr, Ordering};
 use std::sync::{Mutex};

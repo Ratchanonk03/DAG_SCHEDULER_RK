@@ -33,8 +33,6 @@ pub enum OpKind {
 pub struct OpNode {
     /// Unique node ID (index into ComputeDAG::nodes).
     pub id: usize,
-    /// Human-readable name (e.g., "Q0 = X @ Wq0").
-    pub name: String,
     /// The operation this node performs.
     pub kind: OpKind,
     /// IDs of nodes whose outputs are inputs to this node.
@@ -54,11 +52,6 @@ impl ComputeDAG {
     /// Number of nodes in the graph.
     pub fn len(&self) -> usize {
         self.nodes.len()
-    }
-
-    /// True if the graph has no nodes.
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
     }
 
     /// Length of the longest path through the DAG (the *critical path*),
@@ -101,10 +94,10 @@ pub fn build_diamond_dag(rows: usize, cols: usize) -> ComputeDAG {
     ComputeDAG {
         name: format!("Diamond ({}x{})", rows, cols),
         nodes: vec![
-            OpNode { id: 0, name: "A (input)".into(), kind: OpKind::Input, deps: vec![], output_shape: (rows, cols) },
-            OpNode { id: 1, name: "B = ReLU(A)".into(), kind: OpKind::ReLU, deps: vec![0], output_shape: (rows, cols) },
-            OpNode { id: 2, name: "C = ReLU(A)".into(), kind: OpKind::ReLU, deps: vec![0], output_shape: (rows, cols) },
-            OpNode { id: 3, name: "D = B + C".into(), kind: OpKind::ElemAdd, deps: vec![1, 2], output_shape: (rows, cols) },
+            OpNode { id: 0, kind: OpKind::Input, deps: vec![], output_shape: (rows, cols) },
+            OpNode { id: 1, kind: OpKind::ReLU, deps: vec![0], output_shape: (rows, cols) },
+            OpNode { id: 2, kind: OpKind::ReLU, deps: vec![0], output_shape: (rows, cols) },
+            OpNode { id: 3, kind: OpKind::ElemAdd, deps: vec![1, 2], output_shape: (rows, cols) },
         ],
     }
 }
@@ -124,7 +117,6 @@ pub fn build_wide_fan_dag(fan_width: usize, rows: usize, cols: usize) -> Compute
     // Node 0: Input root
     nodes.push(OpNode {
         id: 0,
-        name: "Root (input)".into(),
         kind: OpKind::Input,
         deps: vec![],
         output_shape: (rows, cols),
@@ -134,7 +126,6 @@ pub fn build_wide_fan_dag(fan_width: usize, rows: usize, cols: usize) -> Compute
     for i in 1..=fan_width {
         nodes.push(OpNode {
             id: i,
-            name: format!("Fan_{} = ReLU(Root)", i),
             kind: OpKind::ReLU,
             deps: vec![0],
             output_shape: (rows, cols),
@@ -147,7 +138,6 @@ pub fn build_wide_fan_dag(fan_width: usize, rows: usize, cols: usize) -> Compute
         let first_tmp_id = fan_width + 1;
         nodes.push(OpNode {
             id: first_tmp_id,
-            name: "Sink_add_1".into(),
             kind: OpKind::ElemAdd,
             deps: vec![1, 2],
             output_shape: (rows, cols),
@@ -156,7 +146,6 @@ pub fn build_wide_fan_dag(fan_width: usize, rows: usize, cols: usize) -> Compute
             let node_id = first_tmp_id + i - 2;
             nodes.push(OpNode {
                 id: node_id,
-                name: format!("Sink_add_{}", i - 1),
                 kind: OpKind::ElemAdd,
                 deps: vec![node_id - 1, i],
                 output_shape: (rows, cols),
@@ -187,7 +176,6 @@ pub fn build_chain_dag(depth: usize, rows: usize, cols: usize) -> ComputeDAG {
 
     nodes.push(OpNode {
         id: 0,
-        name: "Chain input".into(),
         kind: OpKind::Input,
         deps: vec![],
         output_shape: (rows, cols),
@@ -202,7 +190,6 @@ pub fn build_chain_dag(depth: usize, rows: usize, cols: usize) -> ComputeDAG {
         };
         nodes.push(OpNode {
             id: i,
-            name: format!("Chain_{}", i),
             kind,
             deps: vec![i - 1],
             output_shape: (rows, cols),
@@ -249,11 +236,10 @@ pub fn build_attention_dag(seq_len: usize, embed_dim: usize, num_heads: usize) -
     let mut id = 0;
 
     macro_rules! node {
-        ($name:expr, $kind:expr, $deps:expr, $shape:expr) => {{
+        ($_name:expr, $kind:expr, $deps:expr, $shape:expr) => {{
             let nid = id;
             nodes.push(OpNode {
                 id: nid,
-                name: $name.to_string(),
                 kind: $kind,
                 deps: $deps,
                 output_shape: $shape,
@@ -270,10 +256,10 @@ pub fn build_attention_dag(seq_len: usize, embed_dim: usize, num_heads: usize) -
     let mut wq = Vec::with_capacity(num_heads);
     let mut wk = Vec::with_capacity(num_heads);
     let mut wv = Vec::with_capacity(num_heads);
-    for h in 0..num_heads {
-        wq.push(node!(format!("Wq{}", h), OpKind::Input, vec![], (embed_dim, head_dim)));
-        wk.push(node!(format!("Wk{}", h), OpKind::Input, vec![], (embed_dim, head_dim)));
-        wv.push(node!(format!("Wv{}", h), OpKind::Input, vec![], (embed_dim, head_dim)));
+    for _ in 0..num_heads {
+        wq.push(node!("Wq", OpKind::Input, vec![], (embed_dim, head_dim)));
+        wk.push(node!("Wk", OpKind::Input, vec![], (embed_dim, head_dim)));
+        wv.push(node!("Wv", OpKind::Input, vec![], (embed_dim, head_dim)));
     }
 
     // QKV projections: 3 × num_heads independent matmuls.
@@ -478,15 +464,6 @@ impl ReadyTracker {
         self.completed_count.load(Ordering::Acquire) == self.num_nodes
     }
 
-    /// True if this specific node has been retired.
-    pub fn is_complete(&self, node_id: usize) -> bool {
-        self.completed[node_id].load(Ordering::Acquire)
-    }
-
-    /// Total number of nodes.
-    pub fn num_nodes(&self) -> usize {
-        self.num_nodes
-    }
 }
 
 #[cfg(test)]

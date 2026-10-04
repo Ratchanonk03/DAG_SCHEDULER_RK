@@ -5,7 +5,6 @@
 // otherwise emit a wall of dead-code and unused-import warnings on a fresh
 // clone. Once your implementation is complete, DELETE this line and make
 // sure `cargo build` is still warning-free — that is part of the grade.
-#![allow(dead_code, unused_imports, unused_variables)]
 
 mod dag;
 mod rng;

@@ -129,11 +129,6 @@ impl Scheduler {
         }
     }
 
-    /// Number of workers this scheduler runs.
-    pub fn num_workers(&self) -> usize {
-        self.num_workers
-    }
-
     /// Execute the DAG using work-stealing parallelism.
     ///
     /// Returns execution statistics — see `RunStats`. Note that you must
@@ -227,9 +222,9 @@ impl Scheduler {
 
         // --- YOUR CODE HERE ---
 
-        let queues = Arc::new((0..num_workers)
+        let queues = (0..num_workers)
             .map(|_| Arc::new(StealQueue::<usize>::with_capacity(dag.len())))
-            .collect::<Vec<_>>());
+            .collect::<Vec<_>>();
 
         for (i, node_id) in tracker.initial_frontier().into_iter().enumerate() {
             queues[i % num_workers].push(node_id);
@@ -241,7 +236,6 @@ impl Scheduler {
             let mut handles = Vec::new();
             
             for worker_id in 0..num_workers {
-                let queues_handle = Arc::clone(&queues);
                 let tracker_handle = Arc::clone(&tracker);
 
                 handles.push(scope.spawn(move || {

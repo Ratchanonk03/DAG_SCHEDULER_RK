@@ -211,8 +211,4 @@ impl TensorStore {
         *guard = Some(tensor);
     }
 
-    /// Check if a node's output has been written.
-    pub fn is_available(&self, node_id: usize) -> bool {
-        self.store[node_id].read().unwrap().is_some()
-    }
 }
