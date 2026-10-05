@@ -140,7 +140,7 @@ impl Scheduler {
         let config = self.config;
         let tracker = Arc::new(ReadyTracker::new(dag));
 
-        // TODO: Implement the work-stealing scheduler.
+        // TODO(DONE): Implement the work-stealing scheduler.
         //
         // HIGH-LEVEL STEPS
         //
